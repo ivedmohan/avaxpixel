@@ -1,8 +1,9 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { usePublicClient } from 'wagmi'
-import { parseAbi } from 'viem'
-import { usePrivy, useSignMessage, useWallets } from '@privy-io/react-auth'
-import { useSmoothSendPrivyWrite } from '@smoothsend/sdk/avax'
+import { createWalletClient, custom, parseAbi, type WalletClient } from 'viem'
+import { avalancheFuji } from 'wagmi/chains'
+import { usePrivy, useWallets } from '@privy-io/react-auth'
+import { useSmoothSendWrite } from '@smoothsend/sdk/avax'
 import { packPixelUpdate } from './pixelPacking'
 import { usePixelSync } from './usePixelSync'
 import { BOARD_SIZE, CONTRACT_ADDRESS, PALETTE } from './config'
@@ -33,18 +34,15 @@ function toHexColor(value: bigint | number): `#${string}` {
 export default function App() {
   const { authenticated, ready, login, logout } = usePrivy()
   const { wallets } = useWallets()
-  const { signMessage } = useSignMessage()
   const publicClient = usePublicClient()
   const activeWalletAddress = wallets[0]?.address as `0x${string}` | undefined
+  const [walletClient, setWalletClient] = useState<WalletClient | null>(null)
 
-  const { writeContract, isPending } = useSmoothSendPrivyWrite({
+  const { writeContract, isPending } = useSmoothSendWrite({
     publicClient,
     apiKey: (import.meta as any).env.VITE_SMOOTHSEND_API_KEY as string,
     ownerAddress: activeWalletAddress ?? ZERO_ADDRESS,
-    signMessage: async ({ message }) => {
-      const result = await signMessage({ message })
-      return result.signature
-    },
+    walletClient,
   })
 
   const [pixels, setPixels] = useState<string[]>(makeGrid)
@@ -67,6 +65,37 @@ export default function App() {
   }, [])
 
   usePixelSync(applyPixelFromChain, true)
+
+  useEffect(() => {
+    let cancelled = false
+
+    const loadWalletClient = async () => {
+      if (!authenticated || !wallets.length || !activeWalletAddress) {
+        setWalletClient(null)
+        return
+      }
+
+      try {
+        const provider = await wallets[0].getEthereumProvider()
+        if (cancelled) return
+
+        const client = createWalletClient({
+          account: activeWalletAddress,
+          chain: avalancheFuji,
+          transport: custom(provider),
+        })
+        setWalletClient(client)
+      } catch {
+        if (!cancelled) setWalletClient(null)
+      }
+    }
+
+    void loadWalletClient()
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeWalletAddress, authenticated, wallets])
 
   useEffect(() => {
     const stopDrawing = () => {
