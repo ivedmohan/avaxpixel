@@ -1,0 +1,41 @@
+{
+  "_format": "hh-sol-cache-2",
+  "files": {
+    "/Users/vedmohan/Projects/SMOOTHSEND/testing-dapps/rplace-pixel/contracts/RPlace.sol": {
+      "lastModificationDate": 1783436236624,
+      "contentHash": "f42042423220eec10aa7a7511d66d959",
+      "sourceName": "contracts/RPlace.sol",
+      "solcConfig": {
+        "version": "0.8.24",
+        "settings": {
+          "optimizer": {
+            "enabled": true,
+            "runs": 200
+          },
+          "evmVersion": "paris",
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [],
+      "versionPragmas": [
+        "^0.8.24"
+      ],
+      "artifacts": [
+        "RPlace"
+      ]
+    }
+  }
+}
