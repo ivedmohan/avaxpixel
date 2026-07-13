@@ -297,8 +297,8 @@ h1 {
 }
 
 .cell {
-  width: 9px;
-  height: 9px;
+  width: 12px;
+  height: 12px;
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;

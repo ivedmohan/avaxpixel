@@ -13,7 +13,7 @@ const contractAbi = parseAbi([
   'function getCanvas() external view returns (uint24[4096])',
 ])
 
-const PIXEL_SIZE = 9
+const PIXEL_SIZE = 12
 const EMPTY = '#ffffff'
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as const
 const MAX_BATCH_SIZE = 256
