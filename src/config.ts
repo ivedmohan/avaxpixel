@@ -6,6 +6,7 @@ export const CONTRACT_ADDRESS = '0x098398b4Cd30DD4334d0c61F258dc4a400da9f57' as 
 export const POLL_INTERVAL_MS = 5_000
 
 export const SMOOTHSEND_API_KEY = (import.meta as any).env.VITE_SMOOTHSEND_API_KEY as string
+export const PRIVY_APP_ID = (import.meta as any).env.VITE_PRIVY_APP_ID as string
 
 export const PALETTE = [
   '#ffffff', '#000000', '#ff4500', '#ffa800', '#ffd635',

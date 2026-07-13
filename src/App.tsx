@@ -1,8 +1,8 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
-import { useAccount, useConnect, useDisconnect, usePublicClient, useWalletClient } from 'wagmi'
-import { injected } from 'wagmi/connectors'
+import { usePublicClient } from 'wagmi'
 import { parseAbi } from 'viem'
-import { useSmoothSendWrite } from '@smoothsend/sdk/avax'
+import { usePrivy, useSignMessage, useWallets } from '@privy-io/react-auth'
+import { useSmoothSendPrivyWrite } from '@smoothsend/sdk/avax'
 import { packPixelUpdate } from './pixelPacking'
 import { usePixelSync } from './usePixelSync'
 import { BOARD_SIZE, CONTRACT_ADDRESS, PALETTE } from './config'
@@ -14,6 +14,8 @@ const contractAbi = parseAbi([
 
 const PIXEL_SIZE = 9
 const EMPTY = '#ffffff'
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as const
+const MAX_BATCH_SIZE = 256
 
 function makeGrid() {
   return Array<string>(BOARD_SIZE * BOARD_SIZE).fill(EMPTY)
@@ -29,17 +31,20 @@ function toHexColor(value: bigint | number): `#${string}` {
 }
 
 export default function App() {
-  const { address, isConnected } = useAccount()
-  const { connect, connectors, isPending: isConnecting } = useConnect()
-  const { disconnect } = useDisconnect()
+  const { authenticated, ready, login, logout } = usePrivy()
+  const { wallets } = useWallets()
+  const { signMessage } = useSignMessage()
   const publicClient = usePublicClient()
-  const { data: walletClient } = useWalletClient()
+  const activeWalletAddress = wallets[0]?.address as `0x${string}` | undefined
 
-  const { writeContract, isPending } = useSmoothSendWrite({
-    apiKey: (import.meta as any).env.VITE_SMOOTHSEND_API_KEY as string,
+  const { writeContract, isPending } = useSmoothSendPrivyWrite({
     publicClient,
-    walletClient: walletClient ?? undefined,
-    ownerAddress: address as `0x${string}` | undefined,
+    apiKey: (import.meta as any).env.VITE_SMOOTHSEND_API_KEY as string,
+    ownerAddress: activeWalletAddress ?? ZERO_ADDRESS,
+    signMessage: async ({ message }) => {
+      const result = await signMessage({ message })
+      return result.signature
+    },
   })
 
   const [pixels, setPixels] = useState<string[]>(makeGrid)
@@ -48,6 +53,8 @@ export default function App() {
   const [status, setStatus] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const isDrawing = useRef(false)
+  const pendingPixels = useRef<Map<number, bigint>>(new Map())
+  const flushPaintQueueRef = useRef<(() => Promise<void>) | null>(null)
   const activeColor = isEraser ? EMPTY : selectedColor
 
   const applyPixelFromChain = useCallback((x: number, y: number, rgb: string) => {
@@ -60,6 +67,23 @@ export default function App() {
   }, [])
 
   usePixelSync(applyPixelFromChain, true)
+
+  useEffect(() => {
+    const stopDrawing = () => {
+      if (!isDrawing.current) return
+      isDrawing.current = false
+      void flushPaintQueueRef.current?.()
+    }
+
+    window.addEventListener('pointerup', stopDrawing)
+    window.addEventListener('pointercancel', stopDrawing)
+    window.addEventListener('blur', stopDrawing)
+    return () => {
+      window.removeEventListener('pointerup', stopDrawing)
+      window.removeEventListener('pointercancel', stopDrawing)
+      window.removeEventListener('blur', stopDrawing)
+    }
+  }, [])
 
   useEffect(() => {
     if (!publicClient) return
@@ -84,61 +108,74 @@ export default function App() {
     loadCanvas()
   }, [publicClient])
 
-  const submitPixel = async (index: number, color: string) => {
-    if (!isConnected || !address) return
-    if (isPending || submitting) return
-
+  const queuePixel = useCallback((index: number, color: string) => {
+    if (!authenticated || !activeWalletAddress) return
     const x = index % BOARD_SIZE
     const y = Math.floor(index / BOARD_SIZE)
+    const packed = packPixelUpdate(x, y, color)
+    pendingPixels.current.set(index, packed)
+    setPixels(prev => {
+      const next = [...prev]
+      next[index] = color
+      return next
+    })
+  }, [activeWalletAddress, authenticated])
+
+  const flushPaintQueue = useCallback(async () => {
+    if (!authenticated || !activeWalletAddress) return
+    if (isPending || submitting) return
+    if (pendingPixels.current.size === 0) return
+
+    const batchEntries = [...pendingPixels.current.entries()]
+    pendingPixels.current.clear()
+
     setSubmitting(true)
-    setStatus('Placing pixel...')
+    setStatus(`Painting ${batchEntries.length} pixel${batchEntries.length === 1 ? '' : 's'}...`)
 
     try {
-      const packed = packPixelUpdate(x, y, color)
-      await writeContract({
-        abi: contractAbi,
-        address: CONTRACT_ADDRESS,
-        functionName: 'paintPixels',
-        args: [[packed]],
-        mode: 'developer-sponsored',
-      })
-      setStatus('Pixel placed.')
+      const packedBatch = batchEntries.map(([, packed]) => packed)
+      for (let i = 0; i < packedBatch.length; i += MAX_BATCH_SIZE) {
+        const chunk = packedBatch.slice(i, i + MAX_BATCH_SIZE)
+        await writeContract({
+          abi: contractAbi,
+          address: CONTRACT_ADDRESS,
+          functionName: 'paintPixels',
+          args: [chunk],
+          mode: 'developer-sponsored',
+        })
+      }
+      setStatus(`Placed ${batchEntries.length} pixel${batchEntries.length === 1 ? '' : 's'}.`)
       setTimeout(() => setStatus(''), 1800)
     } catch (e: unknown) {
+      for (const [index, packed] of batchEntries) {
+        pendingPixels.current.set(index, packed)
+      }
       const err = e as { shortMessage?: string; message?: string }
       setStatus(`Error: ${err?.shortMessage || err?.message || 'Unknown error'}`)
     } finally {
       setSubmitting(false)
     }
-  }
+  }, [activeWalletAddress, authenticated, isPending, submitting, writeContract])
 
-  const handleMouseDown = (index: number) => {
+  useEffect(() => {
+    flushPaintQueueRef.current = flushPaintQueue
+  }, [flushPaintQueue])
+
+  const handlePointerDown = (index: number) => {
+    if (!authenticated || !ready || isPending || submitting) return
     isDrawing.current = true
-    setPixels(prev => {
-      const next = [...prev]
-      next[index] = activeColor
-      return next
-    })
-    submitPixel(index, activeColor)
+    queuePixel(index, activeColor)
   }
 
-  const handleMouseEnter = (index: number) => {
+  const handlePointerEnter = (index: number) => {
     if (!isDrawing.current) return
-    setPixels(prev => {
-      const next = [...prev]
-      next[index] = activeColor
-      return next
-    })
+    queuePixel(index, activeColor)
   }
 
-  const handleMouseUp = () => {
-    isDrawing.current = false
-  }
-
-  const shortAddr = address ? `${address.slice(0, 6)}...${address.slice(-4)}` : null
-  const busy = isPending || submitting || isConnecting
+  const shortAddr = activeWalletAddress ? `${activeWalletAddress.slice(0, 6)}...${activeWalletAddress.slice(-4)}` : null
+  const busy = isPending || submitting || !ready
   const statusClass = status.startsWith('Error:') ? 'status error' : 'status ok'
-  const canDraw = isConnected && !busy
+  const canDraw = authenticated && !busy
 
   const stats = useMemo(() => {
     let painted = 0
@@ -170,14 +207,14 @@ export default function App() {
 
             <div className="auth-block">
               {shortAddr && <span className="wallet-pill">{shortAddr}</span>}
-              {isConnected ? (
-                <button className="btn ghost" onClick={() => disconnect()}>Disconnect</button>
+              {authenticated ? (
+                <button className="btn ghost" onClick={() => logout()}>Disconnect</button>
               ) : (
                 <button
                   className="btn primary"
-                  onClick={() => connect({ connector: connectors[0] ?? injected() })}
+                  onClick={() => login()}
                 >
-                  Connect wallet
+                  Sign in
                 </button>
               )}
             </div>
@@ -200,9 +237,9 @@ export default function App() {
 
           {status && <div className={statusClass}>{status}</div>}
 
-          {!isConnected && (
+          {!authenticated && (
             <div className="notice">
-              Connect a wallet to paint. SmoothSend sponsors gas automatically for supported transactions.
+              Sign in to paint. Privy handles wallet auth, and SmoothSend sponsors gas for supported transactions.
             </div>
           )}
         </section>
@@ -243,17 +280,16 @@ export default function App() {
               style={{
                 gridTemplateColumns: `repeat(${BOARD_SIZE}, ${PIXEL_SIZE}px)`,
                 gridTemplateRows: `repeat(${BOARD_SIZE}, ${PIXEL_SIZE}px)`,
+                pointerEvents: canDraw ? 'auto' : 'none',
               }}
-              onMouseLeave={handleMouseUp}
-              onMouseUp={handleMouseUp}
             >
               {pixels.map((color, i) => (
                 <div
                   key={i}
                   className="cell"
                   style={{ background: color }}
-                  onMouseDown={() => isConnected && handleMouseDown(i)}
-                  onMouseEnter={() => handleMouseEnter(i)}
+                  onPointerDown={() => handlePointerDown(i)}
+                  onPointerEnter={() => handlePointerEnter(i)}
                 />
               ))}
             </div>

@@ -282,6 +282,9 @@ h1 {
   border: 1px solid #b8b39f;
   border-radius: 8px;
   box-shadow: 0 8px 20px rgba(30, 35, 22, 0.15);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .board.interactive {
@@ -296,6 +299,9 @@ h1 {
 .cell {
   width: 9px;
   height: 9px;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .footnote {
