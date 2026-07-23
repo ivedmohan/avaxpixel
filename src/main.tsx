@@ -2,7 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { WagmiProvider, createConfig, http } from 'wagmi'
-import { avalancheFuji } from 'wagmi/chains'
+import { avalanche } from 'wagmi/chains'
 import { injected } from 'wagmi/connectors'
 import { PrivyProvider } from '@privy-io/react-auth'
 import { SmoothSendAvaxProvider } from '@smoothsend/sdk/avax'
@@ -11,9 +11,9 @@ import App from './App'
 import './index.css'
 
 const wagmiConfig = createConfig({
-  chains: [avalancheFuji],
+  chains: [avalanche],
   connectors: [injected()],
-  transports: { [avalancheFuji.id]: http() },
+  transports: { [avalanche.id]: http() },
 })
 
 const queryClient = new QueryClient()
@@ -31,7 +31,7 @@ createRoot(document.getElementById('root')!).render(
         }}
       >
         <QueryClientProvider client={queryClient}>
-          <SmoothSendAvaxProvider apiKey={SMOOTHSEND_API_KEY} network="testnet">
+          <SmoothSendAvaxProvider apiKey={SMOOTHSEND_API_KEY} network="mainnet">
             <App />
           </SmoothSendAvaxProvider>
         </QueryClientProvider>

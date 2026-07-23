@@ -7,7 +7,8 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "compile": "hardhat compile",
-    "deploy:fuji": "hardhat run scripts/deploy.js --network fuji"
+    "deploy:fuji": "hardhat run scripts/deploy.js --network fuji",
+    "deploy:mainnet": "hardhat run scripts/deploy.js --network avalanche"
   },
   "dependencies": {
     "@privy-io/react-auth": "^3.0.0",

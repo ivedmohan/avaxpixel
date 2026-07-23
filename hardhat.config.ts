@@ -19,6 +19,11 @@ const config: HardhatUserConfig = {
       chainId: 43113,
       accounts,
     },
+    avalanche: {
+      url: 'https://api.avax.network/ext/bc/C/rpc',
+      chainId: 43114,
+      accounts,
+    },
   },
 }
 

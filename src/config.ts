@@ -1,8 +1,8 @@
-import { avalancheFuji } from 'wagmi/chains'
+import { avalanche } from 'wagmi/chains'
 
-export const CHAIN = avalancheFuji
+export const CHAIN = avalanche
 export const BOARD_SIZE = 64
-export const CONTRACT_ADDRESS = '0x098398b4Cd30DD4334d0c61F258dc4a400da9f57' as const
+export const CONTRACT_ADDRESS = '0x2F7E08b40dF5f0345FDad81A688Ec28E3A40dBc8' as const
 export const POLL_INTERVAL_MS = 5_000
 
 export const SMOOTHSEND_API_KEY = (import.meta as any).env.VITE_SMOOTHSEND_API_KEY as string

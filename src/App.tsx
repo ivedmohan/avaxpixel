@@ -1,9 +1,10 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+import type { PointerEvent as ReactPointerEvent } from 'react'
 import { usePublicClient } from 'wagmi'
-import { createWalletClient, custom, parseAbi, type WalletClient } from 'viem'
-import { avalancheFuji } from 'wagmi/chains'
+import { createWalletClient, custom, isHex, parseAbi, toHex } from 'viem'
+import { avalanche } from 'wagmi/chains'
 import { usePrivy, useWallets } from '@privy-io/react-auth'
-import { useSmoothSendWrite } from '@smoothsend/sdk/avax'
+import { useSmoothSendPrivyWrite } from '@smoothsend/sdk/avax'
 import { packPixelUpdate } from './pixelPacking'
 import { usePixelSync } from './usePixelSync'
 import { BOARD_SIZE, CONTRACT_ADDRESS, PALETTE } from './config'
@@ -16,7 +17,9 @@ const contractAbi = parseAbi([
 const PIXEL_SIZE = 12
 const EMPTY = '#ffffff'
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as const
-const MAX_BATCH_SIZE = 256
+const MAX_BATCH_SIZE = 50
+const FLUSH_IDLE_MS = 700
+const FLUSH_TRIGGER_SIZE = 50
 
 function makeGrid() {
   return Array<string>(BOARD_SIZE * BOARD_SIZE).fill(EMPTY)
@@ -36,13 +39,31 @@ export default function App() {
   const { wallets } = useWallets()
   const publicClient = usePublicClient()
   const activeWalletAddress = wallets[0]?.address as `0x${string}` | undefined
-  const [walletClient, setWalletClient] = useState<WalletClient | null>(null)
 
-  const { writeContract, isPending } = useSmoothSendWrite({
+  const signMessage = useCallback(async ({ message }: { message: string }) => {
+    if (!wallets.length || !activeWalletAddress) {
+      throw new Error('Wallet not ready')
+    }
+
+    const rawMessage = (isHex(message) ? message : toHex(message)) as `0x${string}`
+    const provider = await wallets[0].getEthereumProvider()
+    const walletClient = createWalletClient({
+      account: activeWalletAddress,
+      chain: avalanche,
+      transport: custom(provider),
+    })
+
+    return walletClient.signMessage({
+      account: activeWalletAddress,
+      message: { raw: rawMessage },
+    })
+  }, [activeWalletAddress, wallets])
+
+  const { writeContract, isPending } = useSmoothSendPrivyWrite({
     publicClient,
     apiKey: (import.meta as any).env.VITE_SMOOTHSEND_API_KEY as string,
     ownerAddress: activeWalletAddress ?? ZERO_ADDRESS,
-    walletClient,
+    signMessage,
   })
 
   const [pixels, setPixels] = useState<string[]>(makeGrid)
@@ -51,15 +72,33 @@ export default function App() {
   const [status, setStatus] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const isDrawing = useRef(false)
+  const boardRef = useRef<HTMLDivElement | null>(null)
   const pendingPixels = useRef<Map<number, bigint>>(new Map())
+  const optimisticPixels = useRef<Map<number, string>>(new Map())
   const flushPaintQueueRef = useRef<(() => Promise<void>) | null>(null)
+  const flushTimerRef = useRef<number | null>(null)
+  const submittingRef = useRef(false)
   const activeColor = isEraser ? EMPTY : selectedColor
+
+  const scheduleFlush = useCallback((delayMs = 0) => {
+    if (flushTimerRef.current !== null) return
+    flushTimerRef.current = window.setTimeout(() => {
+      flushTimerRef.current = null
+      void flushPaintQueueRef.current?.()
+    }, delayMs)
+  }, [])
 
   const applyPixelFromChain = useCallback((x: number, y: number, rgb: string) => {
     if (!isHexColor(rgb)) return
+    const index = y * BOARD_SIZE + x
+    const optimistic = optimisticPixels.current.get(index)
+    if (optimistic && optimistic.toLowerCase() !== rgb.toLowerCase()) return
+    if (optimistic && optimistic.toLowerCase() === rgb.toLowerCase()) {
+      optimisticPixels.current.delete(index)
+    }
     setPixels(prev => {
       const next = [...prev]
-      next[y * BOARD_SIZE + x] = rgb
+      next[index] = rgb
       return next
     })
   }, [])
@@ -67,40 +106,13 @@ export default function App() {
   usePixelSync(applyPixelFromChain, true)
 
   useEffect(() => {
-    let cancelled = false
-
-    const loadWalletClient = async () => {
-      if (!authenticated || !wallets.length || !activeWalletAddress) {
-        setWalletClient(null)
-        return
-      }
-
-      try {
-        const provider = await wallets[0].getEthereumProvider()
-        if (cancelled) return
-
-        const client = createWalletClient({
-          account: activeWalletAddress,
-          chain: avalancheFuji,
-          transport: custom(provider),
-        })
-        setWalletClient(client)
-      } catch {
-        if (!cancelled) setWalletClient(null)
-      }
-    }
-
-    void loadWalletClient()
-
-    return () => {
-      cancelled = true
-    }
-  }, [activeWalletAddress, authenticated, wallets])
-
-  useEffect(() => {
     const stopDrawing = () => {
       if (!isDrawing.current) return
       isDrawing.current = false
+      if (flushTimerRef.current !== null) {
+        window.clearTimeout(flushTimerRef.current)
+        flushTimerRef.current = null
+      }
       void flushPaintQueueRef.current?.()
     }
 
@@ -111,8 +123,18 @@ export default function App() {
       window.removeEventListener('pointerup', stopDrawing)
       window.removeEventListener('pointercancel', stopDrawing)
       window.removeEventListener('blur', stopDrawing)
+      if (flushTimerRef.current !== null) {
+        window.clearTimeout(flushTimerRef.current)
+        flushTimerRef.current = null
+      }
     }
   }, [])
+
+  useEffect(() => {
+    if (isPending || submittingRef.current) return
+    if (pendingPixels.current.size === 0) return
+    scheduleFlush(0)
+  }, [isPending, scheduleFlush])
 
   useEffect(() => {
     if (!publicClient) return
@@ -139,25 +161,59 @@ export default function App() {
 
   const queuePixel = useCallback((index: number, color: string) => {
     if (!authenticated || !activeWalletAddress) return
+    if (index < 0 || index >= BOARD_SIZE * BOARD_SIZE) return
     const x = index % BOARD_SIZE
     const y = Math.floor(index / BOARD_SIZE)
     const packed = packPixelUpdate(x, y, color)
     pendingPixels.current.set(index, packed)
+    optimisticPixels.current.set(index, color)
     setPixels(prev => {
       const next = [...prev]
       next[index] = color
       return next
     })
-  }, [activeWalletAddress, authenticated])
+
+    if (isPending || submittingRef.current) {
+      return
+    }
+
+    if (pendingPixels.current.size >= FLUSH_TRIGGER_SIZE) {
+      if (flushTimerRef.current !== null) {
+        window.clearTimeout(flushTimerRef.current)
+        flushTimerRef.current = null
+      }
+      void flushPaintQueueRef.current?.()
+      return
+    }
+
+    if (flushTimerRef.current !== null) {
+      window.clearTimeout(flushTimerRef.current)
+      flushTimerRef.current = null
+    }
+    scheduleFlush(FLUSH_IDLE_MS)
+  }, [activeWalletAddress, authenticated, isPending, scheduleFlush])
+
+  const queuePixelFromPoint = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const board = boardRef.current
+    if (!board) return
+
+    const rect = board.getBoundingClientRect()
+    const x = Math.floor((event.clientX - rect.left) / PIXEL_SIZE)
+    const y = Math.floor((event.clientY - rect.top) / PIXEL_SIZE)
+
+    if (x < 0 || y < 0 || x >= BOARD_SIZE || y >= BOARD_SIZE) return
+    queuePixel(y * BOARD_SIZE + x, activeColor)
+  }, [activeColor, queuePixel])
 
   const flushPaintQueue = useCallback(async () => {
     if (!authenticated || !activeWalletAddress) return
-    if (isPending || submitting) return
     if (pendingPixels.current.size === 0) return
+    if (isPending || submittingRef.current) return
 
     const batchEntries = [...pendingPixels.current.entries()]
     pendingPixels.current.clear()
 
+    submittingRef.current = true
     setSubmitting(true)
     setStatus(`Painting ${batchEntries.length} pixel${batchEntries.length === 1 ? '' : 's'}...`)
 
@@ -182,29 +238,49 @@ export default function App() {
       const err = e as { shortMessage?: string; message?: string }
       setStatus(`Error: ${err?.shortMessage || err?.message || 'Unknown error'}`)
     } finally {
+      submittingRef.current = false
       setSubmitting(false)
+      if (pendingPixels.current.size > 0) {
+        if (flushTimerRef.current !== null) {
+          window.clearTimeout(flushTimerRef.current)
+          flushTimerRef.current = null
+        }
+        scheduleFlush(0)
+      }
     }
-  }, [activeWalletAddress, authenticated, isPending, submitting, writeContract])
+  }, [activeWalletAddress, authenticated, isPending, scheduleFlush, writeContract])
 
   useEffect(() => {
     flushPaintQueueRef.current = flushPaintQueue
   }, [flushPaintQueue])
 
-  const handlePointerDown = (index: number) => {
-    if (!authenticated || !ready || isPending || submitting) return
+  const handleBoardPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!authenticated || !ready) return
     isDrawing.current = true
-    queuePixel(index, activeColor)
+    boardRef.current?.setPointerCapture(event.pointerId)
+    queuePixelFromPoint(event)
   }
 
-  const handlePointerEnter = (index: number) => {
+  const handleBoardPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!isDrawing.current) return
-    queuePixel(index, activeColor)
+    queuePixelFromPoint(event)
+  }
+
+  const handleBoardPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!isDrawing.current) return
+    isDrawing.current = false
+    boardRef.current?.releasePointerCapture(event.pointerId)
+    if (flushTimerRef.current !== null) {
+      window.clearTimeout(flushTimerRef.current)
+      flushTimerRef.current = null
+    }
+    void flushPaintQueueRef.current?.()
   }
 
   const shortAddr = activeWalletAddress ? `${activeWalletAddress.slice(0, 6)}...${activeWalletAddress.slice(-4)}` : null
   const busy = isPending || submitting || !ready
   const statusClass = status.startsWith('Error:') ? 'status error' : 'status ok'
-  const canDraw = authenticated && !busy
+  const canDraw = authenticated && ready
 
   const stats = useMemo(() => {
     let painted = 0
@@ -305,20 +381,22 @@ export default function App() {
 
           <div className="board-wrap">
             <div
+              ref={boardRef}
               className={canDraw ? 'board interactive' : 'board disabled'}
               style={{
                 gridTemplateColumns: `repeat(${BOARD_SIZE}, ${PIXEL_SIZE}px)`,
                 gridTemplateRows: `repeat(${BOARD_SIZE}, ${PIXEL_SIZE}px)`,
                 pointerEvents: canDraw ? 'auto' : 'none',
               }}
+              onPointerDown={handleBoardPointerDown}
+              onPointerMove={handleBoardPointerMove}
+              onPointerUp={handleBoardPointerUp}
             >
               {pixels.map((color, i) => (
                 <div
                   key={i}
                   className="cell"
                   style={{ background: color }}
-                  onPointerDown={() => handlePointerDown(i)}
-                  onPointerEnter={() => handlePointerEnter(i)}
                 />
               ))}
             </div>
